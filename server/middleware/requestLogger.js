@@ -2,11 +2,31 @@ const morgan = require('morgan');
 const fs = require('fs');
 const path = require('path');
 
-// Create logs directory if it doesn't exist
-const logsDir = path.join(__dirname, '..', 'logs');
-if (!fs.existsSync(logsDir)) {
-  fs.mkdirSync(logsDir, { recursive: true });
-  console.log('Created logs directory:', logsDir);
+// Check if we're in a serverless environment
+const isServerless = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME;
+
+// Create logs directory only if not in serverless environment
+let logsDir;
+let accessLogStream;
+let errorLogStream;
+
+if (!isServerless) {
+  logsDir = path.join(__dirname, '..', 'logs');
+  if (!fs.existsSync(logsDir)) {
+    fs.mkdirSync(logsDir, { recursive: true });
+    console.log('Created logs directory:', logsDir);
+  }
+  
+  // Create write streams only for non-serverless
+  accessLogStream = fs.createWriteStream(
+    path.join(logsDir, 'access.log'), 
+    { flags: 'a' }
+  );
+  
+  errorLogStream = fs.createWriteStream(
+    path.join(logsDir, 'error.log'), 
+    { flags: 'a' }
+  );
 }
 
 // Custom format for logging
@@ -15,18 +35,6 @@ morgan.token('userId', (req) => req.user?.id || 'anonymous');
 
 // Create a simple log format
 const logFormat = ':remote-addr - :remote-user [:date[clf]] ":method :url HTTP/:http-version" :status :res[content-length] ":referrer" ":user-agent" reqId=:reqId userId=:userId';
-
-// Create write stream for combined logs
-const accessLogStream = fs.createWriteStream(
-  path.join(logsDir, 'access.log'), 
-  { flags: 'a' }
-);
-
-// Create write stream for error logs
-const errorLogStream = fs.createWriteStream(
-  path.join(logsDir, 'error.log'), 
-  { flags: 'a' }
-);
 
 // Middleware to add request ID
 const addRequestId = async (req, res, next) => {
@@ -45,16 +53,20 @@ const addRequestId = async (req, res, next) => {
 };
 
 // Standard request logger
-const requestLogger = morgan(logFormat, {
-  stream: accessLogStream,
-  skip: (req, res) => req.url === '/health' // Skip health checks
-});
+const requestLogger = isServerless 
+  ? morgan(logFormat) // Log to console in serverless
+  : morgan(logFormat, {
+      stream: accessLogStream,
+      skip: (req, res) => req.url === '/health' // Skip health checks
+    });
 
 // Error logger (only logs 4xx and 5xx responses)
-const errorLogger = morgan(logFormat, {
-  stream: errorLogStream,
-  skip: (req, res) => res.statusCode < 400
-});
+const errorLogger = isServerless
+  ? morgan(logFormat, { skip: (req, res) => res.statusCode < 400 }) // Console only in serverless
+  : morgan(logFormat, {
+      stream: errorLogStream,
+      skip: (req, res) => res.statusCode < 400
+    });
 
 // Security logger for suspicious activity
 const securityLogger = (req, res, next) => {
@@ -83,10 +95,15 @@ const securityLogger = (req, res, next) => {
         pattern: pattern.source
       };
       
-      fs.appendFileSync(
-        path.join(logsDir, 'security.log'), 
-        JSON.stringify(logEntry) + '\n'
-      );
+      // In serverless, just log to console
+      if (isServerless) {
+        console.warn('SECURITY_ALERT:', logEntry);
+      } else {
+        fs.appendFileSync(
+          path.join(logsDir, 'security.log'), 
+          JSON.stringify(logEntry) + '\n'
+        );
+      }
     }
   }
   
